@@ -5,6 +5,7 @@ import sys
 from PyQt5.QtWidgets import QApplication, QFileDialog
 import xlsxwriter
 from dataclasses import dataclass
+import numpy as np
 
 
 @dataclass
@@ -92,9 +93,78 @@ def compare(before: list, after: list) -> pd.Series:
     return [False if cell == after[i] else True for i, cell in enumerate(before)]
 
 
-def write_sheet(wb: xlsxwriter.workbook, sheet: str, df: pd.DataFrame, changed: dict):
+def reformat_tasks(orig: pd.DataFrame, changed: list):
+    """Tasks report doesn't include the task lines, reformat it so that
+    Tasks changes include changes to task lines."""
+    orig = orig.reindex(columns=orig.columns.tolist() +
+                        ['Task Lines', 'Object Type', 'Parallel Marker?'])
+    df = pd.DataFrame(columns=orig.columns)
+    changed_rows, changed_cols = zip(*changed)
+    changed_rows = np.array(changed_rows)
+    changed_cols = np.array(changed_cols)
+    configs = {'change from': pre_config,
+               'change to': post_config,
+               'remove': pre_config,
+               'add': post_config}
+
+    def get_task_lines(action: str, i: int) -> pd.DataFrame:
+        """Fetches the config dataframe based on action and row"""
+        if action == '':
+            return pd.DataFrame()
+        return configs[action]['TskLn-'+orig.loc[i, 'Name'].replace(
+            ' ', '_').replace('.', '_')]
+
+    new_changed = []
+    groups = []
+
+    for i in orig.index:
+        start = len(df)
+        df.loc[len(df)] = orig.loc[i]
+        task_lines = get_task_lines(orig.loc[i, 'Action'], i)
+        # store the old task liness for comparison to new
+        if orig.loc[i, 'Action'] == 'change from':
+            old_task = task_lines
+        # add task lines to the dataframe
+        if orig.loc[i, 'Action'] in ['change from', 'change to', 'add']:
+            for line in task_lines.index:
+                if line == 0:
+                    idx = len(df)-1
+                else:
+                    idx = len(df)
+                df.loc[idx, 'Action'] = orig.loc[i, 'Action']
+                df.loc[idx, 'Task Lines'] = task_lines.loc[line, 'Name']
+                df.loc[idx, 'Object Type'] = task_lines.loc[line, 'Type']
+                df.loc[idx, 'Parallel Marker?'] = task_lines.loc[line,
+                                                                 'Is Line Parallel']
+
+        # convert old changed to new
+        for change in np.flatnonzero(changed_rows == i):
+            new_changed.append((start, changed_cols[change]))
+        # add new task lines to changed if they differ from old
+        if orig.loc[i, 'Action'] == 'change to' and not task_lines.equals(old_task):
+            lines_rows = range(start, len(df))
+            new_changed += list(zip(lines_rows, [4]*len(lines_rows)))
+            new_changed += list(zip(lines_rows, [5]*len(lines_rows)))
+            new_changed += list(zip(lines_rows, [6]*len(lines_rows)))
+        # always add task lines to new tasks
+        if orig.loc[i, 'Action'] == 'add':
+            lines_rows = range(start, len(df))
+            new_changed += list(zip(lines_rows, [4]*len(lines_rows)))
+            new_changed += list(zip(lines_rows, [5]*len(lines_rows)))
+            new_changed += list(zip(lines_rows, [6]*len(lines_rows)))
+        if orig.loc[i, 'Action'] != '':
+            groups.append((start+1, len(df)+1))
+    return df.fillna(''), new_changed, groups
+
+
+def write_sheet(wb: xlsxwriter.workbook, sheet: str, df: pd.DataFrame, changed: list):
+    """"""
     f = formats(wb)
     ws = wb.add_worksheet(sheet)
+    ws.outline_settings(True, False, True, True)
+    groups = False
+    if sheet == "Tasks":
+        df, changed, groups = reformat_tasks(df, changed)
     for c, header in enumerate(df.columns):
         ws.write(0, c, header, f.header)
     for r in df.index:
@@ -109,11 +179,26 @@ def write_sheet(wb: xlsxwriter.workbook, sheet: str, df: pd.DataFrame, changed: 
                 ws.write(r+1, c, val, f.remove)
             if act == 'add':
                 ws.write(r+1, c, val, f.add)
+    if groups:
+        collapsed = {'change from': True,
+                     'change to': False,
+                     'remove': True,
+                     'add': False,
+                     '': False}
+        for (start, end) in groups:
+            for g in range(start+1, end):
+                ws.set_row(g, None, None, {
+                           'level': 1, 'hidden': collapsed[df.loc[start, 'Action']]})
+            ws.set_row(start, None, None, {
+                       'collapsed': collapsed[df.loc[start, 'Action']]})
 
 
-def create_sheet(pre: pd.DataFrame, post: pd.DataFrame) -> pd.DataFrame:
+def create_sheet(rpt: str) -> pd.DataFrame:
     """Creates and returns the calculations specification page as a pandas DataFrame,
-    along with a dictionary for changed cells with differences"""
+    along with a tuple index list of cells with differences"""
+    pre = pre_config[rpt]
+    post = post_config[rpt]
+
     matching = find_matching(pre, post)
     removed = find_removed(pre, post)
     added = find_added(pre, post)
@@ -142,12 +227,12 @@ def create_sheet(pre: pd.DataFrame, post: pd.DataFrame) -> pd.DataFrame:
     for a in added:
         df.loc[len(df)] = ['add']+post.loc[a].tolist()
         df.loc[len(df)] = ['']*(len(post.columns)+1)
-    print(changed)
     return df, changed
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    global pre_config, post_config
     # pre_config, _ = QFileDialog.getOpenFileName(
     #     None, 'Select config report taken before changes...', '', '*.zip')
     # if not pre_config:
@@ -156,11 +241,11 @@ if __name__ == "__main__":
     #     None, 'Select config report taken after changes...', '', '*.zip')
     # if not pre_config:
     #     raise Exception('Must select Post-Change config report')
-    pre_config = 'Config Reports\Inventories Local_Config_Report_BlueBook_06_Dec_2022.zip'
-    post_config = 'Config Reports\Inventories Local_Config_Report_BAT_06_Dec_2022.zip'
-    pre = read_config_rpt(pre_config)
-    post = read_config_rpt(post_config)
+    pre_config_path = 'Config Reports\Inventories Local_Config_Report_BlueBook_06_Dec_2022.zip'
+    post_config_path = 'Config Reports\Inventories Local_Config_Report_BAT_06_Dec_2022.zip'
+    pre_config = read_config_rpt(pre_config_path)
+    post_config = read_config_rpt(post_config_path)
     with xlsxwriter.Workbook('Outputs/test.xlsx') as wb:
         for rpt in ['Calculations', 'Tasks']:
-            df, changed = create_sheet(pre[rpt], post[rpt])
+            df, changed = create_sheet(rpt)
             write_sheet(wb, rpt, df, changed)
