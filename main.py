@@ -125,6 +125,129 @@ def compare(before: list, after: list) -> pd.Series:
     return [False if cell == after[i] else True for i, cell in enumerate(before)]
 
 
+def create_generic_sheet(rpt: str) -> Tuple[pd.DataFrame, list]:
+    """Creates and returns the a specification page as a pandas DataFrame,
+    along with a tuple index list of cells with differences and a dataframe of 
+    matching objects between pre and post"""
+    none_pre = False
+    none_post = False
+    try:
+        pre = pre_config[rpt]
+    except KeyError:
+        none_pre = True
+    try:
+        post = post_config[rpt]
+    except KeyError:
+        none_post = True
+
+    # if object doesn't exist in either return empty
+    if none_pre and none_post:
+        return pd.DataFrame(), []
+
+    # if exists in one, create the missing dataframe using columns from the other
+    if none_pre:
+        pre = pd.DataFrame(columns=post_config[rpt].columns)
+    if none_post:
+        post = pd.DataFrame(columns=pre_config[rpt].columns)
+
+    # get indices and create their relevant dataframes
+    matching = find_matching(pre, post)
+    pre_i, post_i = [pre for (pre, _) in matching], [
+        post for (_, post) in matching]
+    matching_df = pd.DataFrame({'rpt': [rpt]*len(pre_i), 'pre': pre_i, 'post':  post_i, 'pre_name': [
+                                pre.loc[i, 'Name'] for i in pre_i], 'post_name': [post.loc[i, 'Name'] for i in post_i]})
+    if not matching_df.empty:
+        matching_df = matching_df.sort_values(
+            'pre_name', key=lambda col: col.str.lower()).reset_index(drop=True)
+    deleted = find_deleted(pre, post)
+    created = find_created(pre, post)
+    # drop date columns as we don't need them for spec
+    pre = pre.drop(['Date Created', 'Date Last Used'], axis=1).fillna('')
+    post = post.drop(['Date Created', 'Date Last Used'], axis=1).fillna('')
+    df = pd.DataFrame(columns=['Action']+post.columns.tolist())
+    # changed is a list of (row, column) indices marking format should highlight changes
+    changed = []
+    # add deleted to the df
+    for d in deleted:
+        df.loc[len(df)] = ['Delete']+pre.loc[d].tolist()
+        df.loc[len(df)] = ['']*(len(post.columns)+1)
+    # add matching to the df
+    for r in matching_df.index:
+        before = pre.loc[matching_df.loc[r, 'pre']].tolist()
+        after = post.loc[matching_df.loc[r, 'post']].tolist()
+        compared = compare(before, after)
+        if any(compared):
+            df.loc[len(df)] = ['Change From']+before
+            diff = [i+1 for i, d in enumerate(compared) if d]
+            changed += list(zip([len(df)]*len(diff), diff))
+            df.loc[len(df)] = ['Change To']+after
+            df.loc[len(df)] = ['']*(len(post.columns)+1)
+    # add created to the df
+    for c in created:
+        df.loc[len(df)] = ['Create']+post.loc[c].tolist()
+        df.loc[len(df)] = ['']*(len(post.columns)+1)
+    return df, changed, matching_df
+
+
+def tidy_format(ws: xlsxwriter.Workbook.worksheet_class, sheet: str):
+    """Function to add formatting to worksheet columns based on sheet name"""
+    if sheet == 'Dataset_Definitions':
+        ws.set_column('A:A', width=13)
+        ws.set_column('B:C', width=30)
+        ws.set_column('D:N', width=11)
+    elif sheet == 'Calculations':
+        ws.set_column('A:A', width=13)
+        ws.set_column('B:C', width=40)
+        ws.set_column('D:E', width=24)
+        ws.set_column('F:F', width=10)
+        ws.set_column('G:G', width=12)
+        ws.set_column('H:I', width=10)
+        ws.set_column('J:L', width=25)
+    elif sheet == 'Consistency_Checks':
+        ws.set_column('A:A', width=13)
+        ws.set_column('B:C', width=40)
+        ws.set_column('D:D', width=15)
+        ws.set_column('E:E', width=30)
+        ws.set_column('F:F', width=10)
+        ws.set_column('G:G', width=12)
+        ws.set_column('H:J', width=10)
+        ws.set_column('K:M', width=24)
+    elif sheet == 'Visualisations':
+        ws.set_column('A:A', width=13)
+        ws.set_column('B:C', width=40)
+        ws.set_column('D:D', width=8)
+        ws.set_column('E:E', width=13)
+        ws.set_column('F:F', width=30)
+        ws.set_column('G:G', width=20)
+        ws.set_column('H:I', width=10)
+        ws.set_column('J:L', width=25)
+    elif sheet == 'Import_Definitions':
+        ws.set_column('A:A', width=13)
+        ws.set_column('B:B', width=40)
+        ws.set_column('C:C', width=50)
+        ws.set_column('D:D', width=13)
+        ws.set_column('E:E', width=30)
+        ws.set_column('F:F', width=15)
+        ws.set_column('G:I', width=36)
+    elif sheet == 'Parameters':
+        ws.set_column('A:A', width=13)
+        ws.set_column('B:B', width=40)
+        ws.set_column('C:C', width=100)
+        ws.set_column('D:E', width=15)
+    elif sheet == 'Tasks':
+        ws.set_column('A:A', width=13)
+        ws.set_column('B:B', width=40)
+        ws.set_column('C:C', width=100)
+        ws.set_column('D:D', width=17)
+        ws.set_column('E:E', width=40)
+        ws.set_column('F:F', width=30)
+        ws.set_column('G:G', width=15)
+    else:
+        raise Exception('Unrecognised sheet name')
+
+    ws.freeze_panes(1, 0)
+
+
 def write_generic_sheet(wb: xlsxwriter.workbook, sheet: str, df: pd.DataFrame, changed: list):
     """"""
     if df.empty:
@@ -139,25 +262,27 @@ def write_generic_sheet(wb: xlsxwriter.workbook, sheet: str, df: pd.DataFrame, c
     for r in df.index:
         act = df.loc[r, 'Action']
         for c, val in enumerate(df.loc[r]):
-            if act == 'change from':
+            if act == 'Change From':
                 ws.write(r+1, c, val, f.matching)
-            if act == 'change to':
+            if act == 'Change To':
                 form = f.matching_diffs if (r, c) in changed else f.matching
                 ws.write(r+1, c, val, form)
-            if act == 'delete':
+            if act == 'Delete':
                 ws.write(r+1, c, val, f.delete)
-            if act == 'create':
+            if act == 'Create':
                 ws.write(r+1, c, val, f.create)
+    tidy_format(ws, sheet)
 
 
-def create_classifications_sheet() -> Tuple[pd.DataFrame, list]:
-    """"""
+def write_classification_items_sheet() -> Tuple[pd.DataFrame, list]:
+    """Writes the Classifications Items sheet to the specification file since 
+    classifications come from multiple config files"""
 
 
 def write_tasks_sheet(wb: xlsxwriter.Workbook, master_matching: pd.DataFrame) -> Tuple[pd.DataFrame, list]:
-    """Writes the Tasks sheet to the specification file tasks come from multiple config files"""
+    """Writes the Tasks sheet to the specification file since tasks come from multiple config files"""
 
-    df = pd.DataFrame(columns=['Action', 'Task Name', 'Task Description',
+    df = pd.DataFrame(columns=['Action', 'Name', 'Description',
                       'Parallel Execution?', 'Task Lines', 'Object Type', 'Parallel Marker?'])
     pre_names, post_names = read_task_names(
         pre_config_path), read_task_names(post_config_path)
@@ -177,15 +302,15 @@ def write_tasks_sheet(wb: xlsxwriter.Workbook, master_matching: pd.DataFrame) ->
     def add_task(act: str, start: int, i: int, df: pd.DataFrame, orig: pd.DataFrame):
         """Adds a task and it's task lines to the dataframe"""
         df.loc[start, 'Action'] = act
-        df.loc[start, 'Task Name'] = orig.loc[i, 'Name']
-        df.loc[start, 'Task Description'] = orig.loc[i, 'Description']
+        df.loc[start, 'Name'] = orig.loc[i, 'Name']
+        df.loc[start, 'Description'] = orig.loc[i, 'Description']
         df.loc[start, 'Parallel Execution?'] = orig.loc[i, 'Is Parallel']
         # add in task lines
         if act in ['Change From', 'Delete']:
             tasks = pre_tasks
         if act in ['Change To', 'Create']:
             tasks = post_tasks
-        lines_df = tasks[df.loc[start, 'Task Name']]
+        lines_df = tasks[df.loc[start, 'Name']]
         lines_df = lines_df.rename(columns={
                                    'Name': 'Task Lines', 'Type': 'Object Type', 'Is Line Parallel': 'Parallel Marker?'})
         lines_df.index = range(start, start+len(lines_df))
@@ -348,76 +473,8 @@ def write_tasks_sheet(wb: xlsxwriter.Workbook, master_matching: pd.DataFrame) ->
                 'level': 1, 'hidden': collapsed[df.loc[start, 'Action']]})
         ws.set_row(start, None, None, {
             'collapsed': collapsed[df.loc[start, 'Action']]})
-
-    ws.set_column('A:A', width=13)
-    ws.set_column('B:B', width=40)
-    ws.set_column('C:C', width=100)
-    ws.set_column('D:D', width=17)
-    ws.set_column('E:E', width=40)
-    ws.set_column('F:F', width=30)
-    ws.set_column('G:G', width=15)
-    ws.freeze_panes(1, 0)
-
-
-def create_generic_sheet(rpt: str) -> Tuple[pd.DataFrame, list]:
-    """Creates and returns the a specification page as a pandas DataFrame,
-    along with a tuple index list of cells with differences and a dataframe of 
-    matching objects between pre and post"""
-    none_pre = False
-    none_post = False
-    try:
-        pre = pre_config[rpt]
-    except KeyError:
-        none_pre = True
-    try:
-        post = post_config[rpt]
-    except KeyError:
-        none_post = True
-
-    # if object doesn't exist in either return empty
-    if none_pre and none_post:
-        return pd.DataFrame(), []
-
-    # if exists in one, create the missing dataframe using columns from the other
-    if none_pre:
-        pre = pd.DataFrame(columns=post_config[rpt].columns)
-    if none_post:
-        post = pd.DataFrame(columns=pre_config[rpt].columns)
-
-    matching = find_matching(pre, post)
-    deleted = find_deleted(pre, post)
-    created = find_created(pre, post)
-    # drop date columns as we don't need them for spec
-    pre = pre.drop(['Date Created', 'Date Last Used'], axis=1).fillna('')
-    post = post.drop(['Date Created', 'Date Last Used'], axis=1).fillna('')
-    df = pd.DataFrame(columns=['Action']+post.columns.tolist())
-    # changed is a list of (row, column) indices marking format should highlight changes
-    changed = []
-    # add matching to the df
-    for before_idx, after_idx in matching:
-        before = pre.loc[before_idx].tolist()
-        after = post.loc[after_idx].tolist()
-        compared = compare(before, after)
-        if any(compared):
-            df.loc[len(df)] = ['change from']+before
-            diff = [i+1 for i, d in enumerate(compared) if d]
-            changed += list(zip([len(df)]*len(diff), diff))
-            df.loc[len(df)] = ['change to']+after
-            df.loc[len(df)] = ['']*(len(post.columns)+1)
-    # add deleted to the df
-    for rem in deleted:
-        df.loc[len(df)] = ['delete']+pre.loc[rem].tolist()
-        df.loc[len(df)] = ['']*(len(post.columns)+1)
-    # add created to the df
-    for a in created:
-        df.loc[len(df)] = ['create']+post.loc[a].tolist()
-        df.loc[len(df)] = ['']*(len(post.columns)+1)
-    # create the matching df
-    pre_i, post_i = [pre for (pre, _) in matching], [
-        post for (_, post) in matching]
-    matching_df = pd.DataFrame({'rpt': [rpt]*len(pre_i), 'pre': pre_i, 'post':  post_i, 'pre_name': [
-                               pre_config[rpt].loc[i, 'Name'] for i in pre_i], 'post_name': [post_config[rpt].loc[i, 'Name'] for i in post_i]})
-    return df, changed, matching_df
+    # add tidy formatting
+    tidy_format(ws, 'Tasks')
 
 
 if __name__ == "__main__":
