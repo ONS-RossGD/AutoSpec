@@ -1013,19 +1013,22 @@ def write_tasks_sheet(wb: xlsxwriter.Workbook, master_matching: pd.DataFrame):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     global pre_config, post_config
-    # pre_config, _ = QFileDialog.getOpenFileName(
-    #     None, 'Select config report taken before changes...', '', '*.zip')
-    # if not pre_config:
-    #     raise Exception('Must select Pre-Change config report')
-    # post_config, _ = QFileDialog.getOpenFileName(
-    #     None, 'Select config report taken after changes...', '', '*.zip')
-    # if not pre_config:
-    #     raise Exception('Must select Post-Change config report')
-    pre_config_path = r'Config Reports\Unbalanced Inventories_Config_Report_BlueBook_06_Dec_2022.zip'
-    post_config_path = r'Config Reports\Unbalanced Inventories_Config_Report_BAT_06_Dec_2022.zip'
+    pre_config_path, _ = QFileDialog.getOpenFileName(
+        None, 'Select config report taken before changes...', '', '*.zip')
+    if not pre_config_path:
+        raise Exception('Must select Pre-Change config report')
+    post_config_path, _ = QFileDialog.getOpenFileName(
+        None, 'Select config report taken after changes...', '', '*.zip')
+    if not post_config_path:
+        raise Exception('Must select Post-Change config report')
+    save_path, _ = QFileDialog.getSaveFileName(
+        None, 'Save as...', f'{post_config_path.split("/")[-1].split("_")[0]}',
+        'Excel File(*.xlsx)')
+    if not save_path:
+        raise Exception('Must choose save location')
     pre_config = read_config_rpt(pre_config_path)
     post_config = read_config_rpt(post_config_path)
-    with xlsxwriter.Workbook('Outputs/test.xlsx') as wb:
+    with xlsxwriter.Workbook(save_path) as wb:
         master_matching = pd.DataFrame(
             columns=['rpt', 'pre', 'post', 'pre_name', 'post_name'])
         master_matching = write_classifications_sheet(wb, master_matching)
